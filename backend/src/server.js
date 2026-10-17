@@ -1,14 +1,17 @@
 import "dotenv/config";
 import { createServer } from "node:http";
-import { randomBytes } from "node:crypto";
 import cors from "cors";
 import express from "express";
-import { createClient } from "redis";
 import { WebSocket, WebSocketServer } from "ws";
+import {
+  closeTransferStore,
+  createTransfer,
+  transferExists,
+  transferTtlMilliseconds,
+} from "./transfer-store.js";
 
 const PORT = Number(process.env.PORT ?? 4000);
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN ?? "http://localhost:3000";
-const TRANSFER_TTL_SECONDS = 5 * 60;
 const MAX_WS_PAYLOAD = 2 * 1024 * 1024;
 const allowedSignalTypes = new Set([
   "offer",
@@ -18,16 +21,6 @@ const allowedSignalTypes = new Set([
   "fallback-start",
   "manifest",
 ]);
-
-if (!process.env.REDIS_URL) {
-  throw new Error("REDIS_URL is required");
-}
-
-const redis = createClient({ url: process.env.REDIS_URL });
-redis.on("error", (error) => {
-  console.error("Redis client error:", error);
-});
-await redis.connect();
 
 const app = express();
 app.use(cors({ origin: FRONTEND_ORIGIN }));
@@ -39,26 +32,7 @@ app.get("/health", (_request, response) => {
 
 app.post("/api/transfers", async (_request, response, next) => {
   try {
-    let transferId;
-    let created = false;
-
-    for (let attempt = 0; attempt < 3 && !created; attempt += 1) {
-      transferId = randomBytes(18).toString("base64url");
-      created = await redis.set(
-        `vaultshare:transfer:${transferId}`,
-        JSON.stringify({ createdAt: Date.now() }),
-        { EX: TRANSFER_TTL_SECONDS, NX: true },
-      ) === "OK";
-    }
-
-    if (!created || !transferId) {
-      throw new Error("Could not create a unique transfer ID");
-    }
-
-    response.status(201).json({
-      transferId,
-      expiresInSeconds: TRANSFER_TTL_SECONDS,
-    });
+    response.status(201).json(await createTransfer());
   } catch (error) {
     next(error);
   }
@@ -66,9 +40,7 @@ app.post("/api/transfers", async (_request, response, next) => {
 
 app.get("/api/transfers/:transferId", async (request, response, next) => {
   try {
-    const exists = await redis.exists(
-      `vaultshare:transfer:${request.params.transferId}`,
-    );
+    const exists = await transferExists(request.params.transferId);
     if (!exists) {
       response.status(404).json({ error: "Transfer link expired or not found" });
       return;
@@ -118,14 +90,13 @@ webSocketServer.on("connection", async (socket, request) => {
   }
 
   try {
-    const transferKey = `vaultshare:transfer:${transferId}`;
-    const exists = await redis.exists(transferKey);
+    const exists = await transferExists(transferId);
     if (!exists) {
       socket.close(1008, "Transfer link expired or not found");
       return;
     }
 
-    const ttlMilliseconds = await redis.pTTL(transferKey);
+    const ttlMilliseconds = await transferTtlMilliseconds(transferId);
     if (ttlMilliseconds <= 0) {
       socket.close(1008, "Transfer link expired or not found");
       return;
@@ -244,7 +215,7 @@ server.listen(PORT, "0.0.0.0", () => {
 async function shutdown() {
   webSocketServer.close();
   server.close();
-  await redis.quit();
+  await closeTransferStore();
 }
 
 process.on("SIGINT", shutdown);
