@@ -80,11 +80,20 @@ function getOtherPeer(room, socket) {
 }
 
 webSocketServer.on("connection", async (socket, request) => {
+  if (request.headers.origin !== FRONTEND_ORIGIN) {
+    socket.close(1008, "Origin is not allowed");
+    return;
+  }
+
   const url = new URL(request.url ?? "/", "http://localhost");
   const transferId = url.searchParams.get("transferId");
   const role = url.searchParams.get("role");
 
-  if (!transferId || !["sender", "receiver"].includes(role)) {
+  if (
+    !transferId ||
+    !/^[A-Za-z0-9_-]{24}$/.test(transferId) ||
+    !["sender", "receiver"].includes(role)
+  ) {
     socket.close(1008, "Invalid transfer or role");
     return;
   }

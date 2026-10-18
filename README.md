@@ -54,7 +54,29 @@ link can decrypt the file, so share it only with the intended recipient.
 
 ## Local run
 
-Start Redis locally, then open two terminals.
+Start Redis locally (for example, with Docker Desktop), then open two terminals.
+
+### Redis setup
+
+With Docker Desktop installed and running, start a local Redis instance:
+
+```powershell
+docker run --name vaultshare-redis -p 6379:6379 -d redis:7-alpine
+```
+
+In `backend`, copy `.env.example` to `.env`. The example `REDIS_URL` value,
+`redis://localhost:6379`, works with this local container. Start the backend
+with `npm run dev`. Check `http://localhost:4000/health`; it should return
+`{"status":"ok"}`.
+
+If you already have Redis installed, start its service and use its connection
+URL for `REDIS_URL`. For hosted Redis, create a database with your provider,
+copy its Redis connection URL (including any username/password) into
+`backend/.env`, and keep that credential private. The backend will not start
+until it can connect to Redis.
+
+To stop the Docker Redis instance, run `docker stop vaultshare-redis`. Start it
+again later with `docker start vaultshare-redis`.
 
 ### Backend
 
@@ -63,7 +85,8 @@ cd backend
 npm install
 ```
 
-Copy `.env.example` to `.env` and set `REDIS_URL` to your Redis connection URL.
+Copy `.env.example` to `.env`. Set `REDIS_URL` if your Redis connection differs
+from the local default.
 
 ```sh
 npm run dev
@@ -81,6 +104,10 @@ npm install
 ```
 
 Copy `.env.example` to `.env.local`. The defaults target the local backend.
+Set `NEXT_PUBLIC_APP_URL` to your public deployed frontend origin (for example,
+`https://your-app.vercel.app`) when creating links to share with other people.
+The app refuses to generate a `localhost` share link. Restart the frontend
+after changing `.env.local`.
 
 ```sh
 npm run dev
@@ -100,6 +127,7 @@ Configure:
 
 - `NEXT_PUBLIC_API_URL`: public HTTPS base URL for the backend, without a trailing slash.
 - `NEXT_PUBLIC_SIGNALING_URL`: public WSS URL for the backend WebSocket endpoint, e.g. `wss://your-backend.example/ws`.
+- `NEXT_PUBLIC_APP_URL`: public frontend origin used in generated share links, e.g. `https://your-app.vercel.app`.
 
 Deploy with the Next.js framework preset.
 

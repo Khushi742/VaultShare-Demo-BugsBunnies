@@ -2,7 +2,11 @@
 
 import { useRef, useState } from "react";
 import { createTransferKey, encryptFile } from "@/lib/crypto";
-import { createSignalingSocket, createTransfer } from "@/lib/signaling";
+import {
+  createSignalingSocket,
+  createTransfer,
+  getShareBaseUrl,
+} from "@/lib/signaling";
 
 type Phase = "idle" | "encrypting" | "waiting" | "transferring" | "complete" | "error";
 
@@ -21,7 +25,13 @@ export default function UploadPanel() {
   const [link, setLink] = useState("");
   const [expiresAt, setExpiresAt] = useState("");
   const [error, setError] = useState("");
+  const [toast, setToast] = useState("");
   const [dragging, setDragging] = useState(false);
+
+  function showToast(message: string) {
+    setToast(message);
+    window.setTimeout(() => setToast(""), 2500);
+  }
 
   function sendSignal(message: Record<string, unknown>) {
     const socket = socketRef.current;
@@ -104,7 +114,14 @@ export default function UploadPanel() {
     if (!socket) return;
     const handleMessage = (event: MessageEvent) => {
       if (typeof event.data !== "string") return;
-      const message = JSON.parse(event.data) as { type?: string };
+      let message: { type?: string };
+      try {
+        message = JSON.parse(event.data) as typeof message;
+      } catch {
+        setError("Received invalid signaling data");
+        setPhase("error");
+        return;
+      }
       if (message.type === "fallback-ready") {
         socket.removeEventListener("message", handleMessage);
         void sendEncryptedFile(chunks, details, "websocket").catch((cause: unknown) => {
@@ -142,10 +159,12 @@ export default function UploadPanel() {
     setPhase("encrypting");
 
     try {
+      const shareBaseUrl = getShareBaseUrl();
       const { key, encodedKey } = await createTransferKey();
       const encryptedChunks = await encryptFile(file, key, setProgress);
+      showToast("Encrypted!");
       const { transferId, expiresInSeconds } = await createTransfer();
-      const generatedLink = `${window.location.origin}/receive/${transferId}#key=${encodedKey}`;
+      const generatedLink = `${shareBaseUrl}/receive/${transferId}#key=${encodedKey}`;
       const socket = createSignalingSocket(transferId, "sender");
       socketRef.current = socket;
 
@@ -186,13 +205,20 @@ export default function UploadPanel() {
 
       socket.addEventListener("message", (event: MessageEvent<string>) => {
         if (typeof event.data !== "string") return;
-        const message = JSON.parse(event.data) as {
+        let message: {
           type?: string;
           role?: string;
           candidate?: RTCIceCandidateInit;
           answer?: RTCSessionDescriptionInit;
           message?: string;
         };
+        try {
+          message = JSON.parse(event.data) as typeof message;
+        } catch {
+          setError("Received invalid signaling data");
+          setPhase("error");
+          return;
+        }
         if (message.type === "peer-joined" && message.role === "receiver") {
           if (!fallbackTimerStarted) {
             fallbackTimerStarted = true;
@@ -248,6 +274,12 @@ export default function UploadPanel() {
       setLink(generatedLink);
       setExpiresAt(new Date(Date.now() + expiresInSeconds * 1000).toLocaleTimeString());
       setPhase("waiting");
+      try {
+        await navigator.clipboard.writeText(generatedLink);
+        showToast("Copied!");
+      } catch {
+        showToast("Link created — copy it below.");
+      }
       await new Promise<void>((resolve, reject) => {
         socket.onopen = () => resolve();
         socket.addEventListener("error", () => reject(new Error("Could not connect to the signaling server")), { once: true });
@@ -261,6 +293,7 @@ export default function UploadPanel() {
   async function copyLink() {
     try {
       await navigator.clipboard.writeText(link);
+      showToast("Copied!");
     } catch {
       setError("Clipboard access failed. Select and copy the link manually.");
     }
@@ -279,10 +312,20 @@ export default function UploadPanel() {
     setFileName("");
     setLink("");
     setError("");
+    setToast("");
   }
 
   return (
     <div className="rounded-3xl border border-white/10 bg-[#10141e]/90 p-5 shadow-2xl shadow-black/30 sm:p-8">
+      {toast && (
+        <div
+          className="fixed left-1/2 top-5 z-50 -translate-x-1/2 rounded-xl border border-emerald-400/30 bg-[#10141e] px-5 py-3 text-sm font-medium text-emerald-200 shadow-xl"
+          role="status"
+          aria-live="polite"
+        >
+          {toast}
+        </div>
+      )}
       {phase === "idle" || phase === "error" ? (
         <button
           type="button"
