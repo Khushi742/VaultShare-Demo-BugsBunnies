@@ -11,7 +11,12 @@ import {
 } from "./transfer-store.js";
 
 const PORT = Number(process.env.PORT ?? 4000);
-const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN ?? "http://localhost:3000";
+const FRONTEND_ORIGINS = new Set(
+  (process.env.FRONTEND_ORIGIN ?? "http://localhost:3000,http://127.0.0.1:3000")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean),
+);
 const MAX_WS_PAYLOAD = 2 * 1024 * 1024;
 const allowedSignalTypes = new Set([
   "offer",
@@ -23,7 +28,11 @@ const allowedSignalTypes = new Set([
 ]);
 
 const app = express();
-app.use(cors({ origin: FRONTEND_ORIGIN }));
+app.use(
+  cors({
+    origin: (origin, callback) => callback(null, !origin || FRONTEND_ORIGINS.has(origin)),
+  }),
+);
 app.use(express.json({ limit: "16kb" }));
 
 app.get("/health", (_request, response) => {
@@ -54,7 +63,9 @@ app.get("/api/transfers/:transferId", async (request, response, next) => {
 
 app.use((error, _request, response, _next) => {
   console.error("HTTP request failed:", error);
-  response.status(500).json({ error: "The signaling service encountered an error" });
+  response.status(503).json({
+    error: "Transfer storage is unavailable. Start Redis and check REDIS_URL in backend/.env.",
+  });
 });
 
 const server = createServer(app);
@@ -80,7 +91,7 @@ function getOtherPeer(room, socket) {
 }
 
 webSocketServer.on("connection", async (socket, request) => {
-  if (request.headers.origin !== FRONTEND_ORIGIN) {
+  if (!FRONTEND_ORIGINS.has(request.headers.origin)) {
     socket.close(1008, "Origin is not allowed");
     return;
   }

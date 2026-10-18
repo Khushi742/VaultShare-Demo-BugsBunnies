@@ -6,6 +6,7 @@ import {
   createSignalingSocket,
   createTransfer,
   getShareBaseUrl,
+  isLocalOnlyShareUrl,
 } from "@/lib/signaling";
 
 type Phase = "idle" | "encrypting" | "waiting" | "transferring" | "complete" | "error";
@@ -23,6 +24,7 @@ export default function UploadPanel() {
   const [progress, setProgress] = useState(0);
   const [fileName, setFileName] = useState("");
   const [link, setLink] = useState("");
+  const [localOnlyLink, setLocalOnlyLink] = useState(false);
   const [expiresAt, setExpiresAt] = useState("");
   const [error, setError] = useState("");
   const [toast, setToast] = useState("");
@@ -164,7 +166,9 @@ export default function UploadPanel() {
       const encryptedChunks = await encryptFile(file, key, setProgress);
       showToast("Encrypted!");
       const { transferId, expiresInSeconds } = await createTransfer();
-      const generatedLink = `${shareBaseUrl}/receive/${transferId}#key=${encodedKey}`;
+      const generatedUrl = new URL(`/receive/${transferId}`, shareBaseUrl);
+      generatedUrl.hash = new URLSearchParams({ key: encodedKey }).toString();
+      const generatedLink = generatedUrl.toString();
       const socket = createSignalingSocket(transferId, "sender");
       socketRef.current = socket;
 
@@ -272,6 +276,7 @@ export default function UploadPanel() {
       };
 
       setLink(generatedLink);
+      setLocalOnlyLink(isLocalOnlyShareUrl(shareBaseUrl));
       setExpiresAt(new Date(Date.now() + expiresInSeconds * 1000).toLocaleTimeString());
       setPhase("waiting");
       try {
@@ -311,6 +316,7 @@ export default function UploadPanel() {
     setProgress(0);
     setFileName("");
     setLink("");
+    setLocalOnlyLink(false);
     setError("");
     setToast("");
   }
@@ -417,6 +423,13 @@ export default function UploadPanel() {
               <p className="mt-3 text-xs leading-5 text-amber-200/75">
                 The link includes the decryption key. Share it only with your recipient.
               </p>
+              {localOnlyLink && (
+                <p className="mt-2 text-xs leading-5 text-amber-200/75" role="note">
+                  Local-only link: it works on this computer, not on another device.
+                  For cross-device sharing, use a reachable frontend URL and configure
+                  the API and signaling URLs.
+                </p>
+              )}
             </div>
           )}
 

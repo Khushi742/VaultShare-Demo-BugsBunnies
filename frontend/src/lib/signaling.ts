@@ -13,25 +13,32 @@ export function getShareBaseUrl(): string {
     throw new Error("Set NEXT_PUBLIC_APP_URL to your public website URL.");
   }
 
-  const hostname = url.hostname.toLowerCase();
   if (
     !["http:", "https:"].includes(url.protocol) ||
     url.username ||
     url.password ||
     url.pathname !== "/" ||
     url.search ||
-    url.hash ||
-    hostname === "localhost" ||
-    hostname.endsWith(".localhost") ||
-    hostname === "127.0.0.1" ||
-    hostname === "::1"
+    url.hash
   ) {
     throw new Error(
-      "Share links need a public website URL. Set NEXT_PUBLIC_APP_URL to your deployed frontend URL.",
+      "NEXT_PUBLIC_APP_URL must be a website origin, such as http://localhost:3000.",
     );
   }
 
   return url.origin;
+}
+
+export function isLocalOnlyShareUrl(value: string): boolean {
+  const hostname = new URL(value).hostname.toLowerCase();
+  return (
+    hostname === "localhost" ||
+    hostname.endsWith(".localhost") ||
+    hostname.startsWith("127.") ||
+    hostname === "::1" ||
+    hostname === "[::1]" ||
+    hostname === "0.0.0.0"
+  );
 }
 
 export type SignalMessage = {
@@ -61,13 +68,18 @@ export async function createTransfer(): Promise<{
       `Cannot reach the VaultShare backend at ${API_URL}. Start the backend and Redis, or set NEXT_PUBLIC_API_URL to your deployed backend.`,
     );
   }
-  const result = (await response.json()) as {
+  const result = (await response.json().catch(() => ({}))) as {
     transferId?: string;
     expiresInSeconds?: number;
     error?: string;
   };
   if (!response.ok || !result.transferId || !result.expiresInSeconds) {
-    throw new Error(result.error ?? "Could not create a temporary transfer link");
+    throw new Error(
+      result.error ??
+        (response.status === 503
+          ? "Transfer storage is unavailable. Start Redis and check REDIS_URL in backend/.env."
+          : "Could not create a temporary transfer link"),
+    );
   }
   return {
     transferId: result.transferId,
@@ -87,7 +99,7 @@ export async function verifyTransfer(transferId: string): Promise<void> {
     );
   }
   if (!response.ok) {
-    const result = (await response.json()) as { error?: string };
+    const result = (await response.json().catch(() => ({}))) as { error?: string };
     throw new Error(result.error ?? "This transfer link has expired");
   }
 }
