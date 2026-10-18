@@ -2,10 +2,16 @@
 
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
-import { decryptChunk, importTransferKey } from "@/lib/crypto";
+import {
+  decryptChunk,
+  ENCRYPTION_CHUNK_SIZE,
+  importTransferKey,
+} from "@/lib/crypto";
 import { createSignalingSocket, verifyTransfer } from "@/lib/signaling";
 
 type Phase = "connecting" | "waiting" | "transferring" | "complete" | "error";
+
+const MAX_FILE_SIZE = 1024 * 1024 * 1024;
 
 type Manifest = {
   type: "manifest";
@@ -41,14 +47,25 @@ export default function ReceiverPanel({ transferId }: { transferId: string }) {
         .then(async () => {
           if (typeof data === "string") {
             const message = JSON.parse(data) as Partial<Manifest>;
-            if (message.type !== "manifest" || !message.name || !message.mimeType) {
+            if (
+              message.type !== "manifest" ||
+              typeof message.name !== "string" ||
+              message.name.length === 0 ||
+              message.name.length > 1024 ||
+              typeof message.mimeType !== "string" ||
+              message.mimeType.length === 0 ||
+              message.mimeType.length > 255
+            ) {
               throw new Error("Received invalid file information");
             }
             if (
               typeof message.size !== "number" ||
               typeof message.chunkCount !== "number" ||
+              !Number.isSafeInteger(message.size) ||
+              !Number.isSafeInteger(message.chunkCount) ||
               message.size <= 0 ||
-              message.chunkCount <= 0
+              message.size > MAX_FILE_SIZE ||
+              message.chunkCount !== Math.ceil(message.size / ENCRYPTION_CHUNK_SIZE)
             ) {
               throw new Error("Received invalid file size");
             }
@@ -144,12 +161,19 @@ export default function ReceiverPanel({ transferId }: { transferId: string }) {
             return;
           }
 
-          const message = JSON.parse(event.data) as {
+          let message: {
             type?: string;
             offer?: RTCSessionDescriptionInit;
             candidate?: RTCIceCandidateInit;
             message?: string;
           };
+          try {
+            message = JSON.parse(event.data) as typeof message;
+          } catch {
+            setError("Received invalid signaling data");
+            setPhase("error");
+            return;
+          }
           if (message.type === "manifest") {
             handleData(event.data);
             return;

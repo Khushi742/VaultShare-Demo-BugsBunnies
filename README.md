@@ -54,7 +54,29 @@ link can decrypt the file, so share it only with the intended recipient.
 
 ## Local run
 
-Start Redis locally, then open two terminals.
+Start Redis locally (for example, with Docker Desktop), then open two terminals.
+
+### Redis setup
+
+With Docker Desktop installed and running, start a local Redis instance:
+
+```powershell
+docker run --name vaultshare-redis -p 6379:6379 -d redis:7-alpine
+```
+
+In `backend`, copy `.env.example` to `.env`. The example `REDIS_URL` value,
+`redis://localhost:6379`, works with this local container. Start the backend
+with `npm run dev`. Check `http://localhost:4000/health`; it should return
+`{"status":"ok"}`.
+
+If you already have Redis installed, start its service and use its connection
+URL for `REDIS_URL`. For hosted Redis, create a database with your provider,
+copy its Redis connection URL (including any username/password) into
+`backend/.env`, and keep that credential private. The backend will not start
+until it can connect to Redis.
+
+To stop the Docker Redis instance, run `docker stop vaultshare-redis`. Start it
+again later with `docker start vaultshare-redis`.
 
 ### Backend
 
@@ -63,7 +85,8 @@ cd backend
 npm install
 ```
 
-Copy `.env.example` to `.env` and set `REDIS_URL` to your Redis connection URL.
+Copy `.env.example` to `.env`. Set `REDIS_URL` if your Redis connection differs
+from the local default.
 
 ```sh
 npm run dev
@@ -81,6 +104,9 @@ npm install
 ```
 
 Copy `.env.example` to `.env.local`. The defaults target the local backend.
+`NEXT_PUBLIC_APP_URL` is optional for local development; share links use the
+current browser origin. A localhost or loopback link is local-only and works
+only on the same computer. Restart the frontend after changing `.env.local`.
 
 ```sh
 npm run dev
@@ -91,6 +117,25 @@ link to the recipient. Both users must keep their browser tab open during the
 transfer. The sender sees **Encrypting file**, **Link generated**, and
 **Transfer complete** as the transfer progresses.
 
+### Temporary cross-device testing
+
+Localhost links cannot be opened by another device. For a temporary test, run a
+public tunnel for both local web services (for example, Cloudflare Quick
+Tunnels). Keep Redis bound locally; do not tunnel port 6379.
+
+1. Run `cloudflared tunnel --url http://localhost:3000` and note its HTTPS URL.
+2. Run `cloudflared tunnel --url http://localhost:4000` and note its HTTPS URL.
+3. Set the backend `FRONTEND_ORIGIN` to the frontend tunnel's exact HTTPS origin.
+4. Set frontend `NEXT_PUBLIC_APP_URL` to the frontend HTTPS URL,
+   `NEXT_PUBLIC_API_URL` to the backend HTTPS URL, and
+   `NEXT_PUBLIC_SIGNALING_URL` to the backend URL with `https://` changed to
+   `wss://` and `/ws` appended.
+5. Restart both apps after changing their environment files.
+
+Quick-tunnel URLs can change when restarted. Replace the three frontend values
+and backend `FRONTEND_ORIGIN` with the new URLs. Cross-device transfer requires
+Redis to be running locally and the backend to be reachable through its tunnel.
+
 ## Deployment
 
 ### Frontend (Vercel)
@@ -100,6 +145,7 @@ Configure:
 
 - `NEXT_PUBLIC_API_URL`: public HTTPS base URL for the backend, without a trailing slash.
 - `NEXT_PUBLIC_SIGNALING_URL`: public WSS URL for the backend WebSocket endpoint, e.g. `wss://your-backend.example/ws`.
+- `NEXT_PUBLIC_APP_URL`: public frontend origin used in generated share links, e.g. `https://your-app.vercel.app`.
 
 Deploy with the Next.js framework preset.
 

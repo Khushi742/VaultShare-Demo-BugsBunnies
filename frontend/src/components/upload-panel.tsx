@@ -2,7 +2,12 @@
 
 import { useRef, useState } from "react";
 import { createTransferKey, encryptFile } from "@/lib/crypto";
-import { createSignalingSocket, createTransfer } from "@/lib/signaling";
+import {
+  createSignalingSocket,
+  createTransfer,
+  getShareBaseUrl,
+  isLocalOnlyShareUrl,
+} from "@/lib/signaling";
 
 type Phase =
   | "idle"
@@ -25,10 +30,16 @@ export default function UploadPanel() {
   const [progress, setProgress] = useState(0);
   const [fileName, setFileName] = useState("");
   const [link, setLink] = useState("");
-  const [copied, setCopied] = useState(false);
+  const [localOnlyLink, setLocalOnlyLink] = useState(false);
   const [expiresAt, setExpiresAt] = useState("");
   const [error, setError] = useState("");
+  const [toast, setToast] = useState("");
   const [dragging, setDragging] = useState(false);
+
+  function showToast(message: string) {
+    setToast(message);
+    window.setTimeout(() => setToast(""), 2500);
+  }
 
   function sendSignal(message: Record<string, unknown>) {
     const socket = socketRef.current;
@@ -113,7 +124,14 @@ export default function UploadPanel() {
     if (!socket) return;
     const handleMessage = (event: MessageEvent) => {
       if (typeof event.data !== "string") return;
-      const message = JSON.parse(event.data) as { type?: string };
+      let message: { type?: string };
+      try {
+        message = JSON.parse(event.data) as typeof message;
+      } catch {
+        setError("Received invalid signaling data");
+        setPhase("error");
+        return;
+      }
       if (message.type === "fallback-ready") {
         socket.removeEventListener("message", handleMessage);
         void sendEncryptedFile(chunks, details, "websocket").catch(
@@ -155,10 +173,14 @@ export default function UploadPanel() {
     setPhase("encrypting");
 
     try {
+      const shareBaseUrl = getShareBaseUrl();
       const { key, encodedKey } = await createTransferKey();
       const encryptedChunks = await encryptFile(file, key, setProgress);
+      showToast("Encrypted!");
       const { transferId, expiresInSeconds } = await createTransfer();
-      const generatedLink = `${window.location.origin}/receive/${transferId}#key=${encodedKey}`;
+      const generatedUrl = new URL(`/receive/${transferId}`, shareBaseUrl);
+      generatedUrl.hash = new URLSearchParams({ key: encodedKey }).toString();
+      const generatedLink = generatedUrl.toString();
       const socket = createSignalingSocket(transferId, "sender");
       socketRef.current = socket;
 
@@ -205,13 +227,20 @@ export default function UploadPanel() {
 
       socket.addEventListener("message", (event: MessageEvent<string>) => {
         if (typeof event.data !== "string") return;
-        const message = JSON.parse(event.data) as {
+        let message: {
           type?: string;
           role?: string;
           candidate?: RTCIceCandidateInit;
           answer?: RTCSessionDescriptionInit;
           message?: string;
         };
+        try {
+          message = JSON.parse(event.data) as typeof message;
+        } catch {
+          setError("Received invalid signaling data");
+          setPhase("error");
+          return;
+        }
         if (message.type === "peer-joined" && message.role === "receiver") {
           if (!fallbackTimerStarted) {
             fallbackTimerStarted = true;
@@ -286,10 +315,15 @@ export default function UploadPanel() {
       };
 
       setLink(generatedLink);
-      setExpiresAt(
-        new Date(Date.now() + expiresInSeconds * 1000).toLocaleTimeString(),
-      );
+      setLocalOnlyLink(isLocalOnlyShareUrl(shareBaseUrl));
+      setExpiresAt(new Date(Date.now() + expiresInSeconds * 1000).toLocaleTimeString());
       setPhase("waiting");
+      try {
+        await navigator.clipboard.writeText(generatedLink);
+        showToast("Copied!");
+      } catch {
+        showToast("Link created — copy it below.");
+      }
       await new Promise<void>((resolve, reject) => {
         socket.onopen = () => resolve();
         socket.addEventListener(
@@ -319,6 +353,9 @@ export default function UploadPanel() {
     } catch (error) {
       console.error("Copy failed:", error);
       setError("Could not copy link. Please copy it manually.");
+      showToast("Copied!");
+    } catch {
+      setError("Clipboard access failed. Select and copy the link manually.");
     }
   }
 
@@ -334,11 +371,22 @@ export default function UploadPanel() {
     setProgress(0);
     setFileName("");
     setLink("");
+    setLocalOnlyLink(false);
     setError("");
+    setToast("");
   }
 
   return (
     <div className="rounded-3xl border border-white/10 bg-[#10141e]/90 p-5 shadow-2xl shadow-black/30 sm:p-8">
+      {toast && (
+        <div
+          className="fixed left-1/2 top-5 z-50 -translate-x-1/2 rounded-xl border border-emerald-400/30 bg-[#10141e] px-5 py-3 text-sm font-medium text-emerald-200 shadow-xl"
+          role="status"
+          aria-live="polite"
+        >
+          {toast}
+        </div>
+      )}
       {phase === "idle" || phase === "error" ? (
         <button
           type="button"
@@ -447,6 +495,13 @@ export default function UploadPanel() {
                 The link includes the decryption key. Share it only with your
                 recipient.
               </p>
+              {localOnlyLink && (
+                <p className="mt-2 text-xs leading-5 text-amber-200/75" role="note">
+                  Local-only link: it works on this computer, not on another device.
+                  For cross-device sharing, use a reachable frontend URL and configure
+                  the API and signaling URLs.
+                </p>
+              )}
             </div>
           )}
 
