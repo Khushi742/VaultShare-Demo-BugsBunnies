@@ -460,7 +460,11 @@ export default function UploadPanel() {
   }
 
   function reset() {
-    socketRef.current?.close();
+    if (socketRef.current) {
+  socketRef.current.onclose = null;
+  socketRef.current.onerror = null;
+  socketRef.current.close();
+}
     peerRef.current?.close();
 
     socketRef.current = null;
