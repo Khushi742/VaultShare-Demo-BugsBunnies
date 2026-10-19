@@ -26,6 +26,7 @@ export default function UploadPanel() {
   const channelRef = useRef<RTCDataChannel | null>(null);
   const transferStartedRef = useRef(false);
   const fallbackRequestedRef = useRef(false);
+
   const [phase, setPhase] = useState<Phase>("idle");
   const [progress, setProgress] = useState(0);
   const [fileName, setFileName] = useState("");
@@ -35,6 +36,7 @@ export default function UploadPanel() {
   const [error, setError] = useState("");
   const [toast, setToast] = useState("");
   const [dragging, setDragging] = useState(false);
+  const [copied, setCopied] = useState(false);
 
   function showToast(message: string) {
     setToast(message);
@@ -73,7 +75,9 @@ export default function UploadPanel() {
         transferStartedRef.current = false;
         return;
       }
+
       channel.send(manifest);
+
       for (let index = 0; index < chunks.length; index += 1) {
         while (channel.bufferedAmount > 256 * 1024) {
           await new Promise((resolve) => window.setTimeout(resolve, 20));
@@ -81,6 +85,7 @@ export default function UploadPanel() {
             throw new Error("Peer-to-peer connection closed during transfer");
           }
         }
+
         channel.send(chunks[index]);
         setProgress(Math.round(((index + 1) / chunks.length) * 100));
       }
@@ -92,7 +97,9 @@ export default function UploadPanel() {
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       throw new Error("Fallback connection is unavailable");
     }
+
     socket.send(manifest);
+
     for (let index = 0; index < chunks.length; index += 1) {
       while (socket.bufferedAmount > 256 * 1024) {
         await new Promise((resolve) => window.setTimeout(resolve, 20));
@@ -100,6 +107,7 @@ export default function UploadPanel() {
           throw new Error("Fallback connection closed during transfer");
         }
       }
+
       socket.send(chunks[index]);
       setProgress(Math.round(((index + 1) / chunks.length) * 100));
     }
@@ -111,6 +119,7 @@ export default function UploadPanel() {
   ) {
     if (fallbackRequestedRef.current || transferStartedRef.current) return;
     fallbackRequestedRef.current = true;
+
     try {
       sendSignal({ type: "fallback-start" });
     } catch (cause) {
@@ -120,11 +129,15 @@ export default function UploadPanel() {
       setPhase("error");
       return;
     }
+
     const socket = socketRef.current;
     if (!socket) return;
+
     const handleMessage = (event: MessageEvent) => {
       if (typeof event.data !== "string") return;
+
       let message: { type?: string };
+
       try {
         message = JSON.parse(event.data) as typeof message;
       } catch {
@@ -132,8 +145,10 @@ export default function UploadPanel() {
         setPhase("error");
         return;
       }
+
       if (message.type === "fallback-ready") {
         socket.removeEventListener("message", handleMessage);
+
         void sendEncryptedFile(chunks, details, "websocket").catch(
           (cause: unknown) => {
             setError(
@@ -144,6 +159,7 @@ export default function UploadPanel() {
         );
       }
     };
+
     socket.addEventListener("message", handleMessage);
   }
 
@@ -153,6 +169,7 @@ export default function UploadPanel() {
       setPhase("error");
       return;
     }
+
     if (file.size === 0) {
       setError("Empty files are not supported.");
       setPhase("error");
@@ -161,25 +178,34 @@ export default function UploadPanel() {
 
     socketRef.current?.close();
     peerRef.current?.close();
+
     socketRef.current = null;
     peerRef.current = null;
     channelRef.current = null;
     transferStartedRef.current = false;
     fallbackRequestedRef.current = false;
+
     setFileName(file.name);
     setProgress(0);
     setError("");
     setLink("");
+    setCopied(false);
     setPhase("encrypting");
 
     try {
       const shareBaseUrl = getShareBaseUrl();
       const { key, encodedKey } = await createTransferKey();
       const encryptedChunks = await encryptFile(file, key, setProgress);
+
       showToast("Encrypted!");
+
       const { transferId, expiresInSeconds } = await createTransfer();
       const generatedUrl = new URL(`/receive/${transferId}`, shareBaseUrl);
-      generatedUrl.hash = new URLSearchParams({ key: encodedKey }).toString();
+
+      generatedUrl.hash = new URLSearchParams({
+        key: encodedKey,
+      }).toString();
+
       const generatedLink = generatedUrl.toString();
       const socket = createSignalingSocket(transferId, "sender");
       socketRef.current = socket;
@@ -187,19 +213,29 @@ export default function UploadPanel() {
       const peer = new RTCPeerConnection({
         iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
       });
+
       peerRef.current = peer;
+
       const channel = peer.createDataChannel("vaultshare-file", {
         ordered: true,
       });
+
       channel.binaryType = "arraybuffer";
       channelRef.current = channel;
-      const details = { name: file.name, type: file.type, size: file.size };
+
+      const details = {
+        name: file.name,
+        type: file.type,
+        size: file.size,
+      };
+
       const pendingCandidates: RTCIceCandidateInit[] = [];
       let remoteDescriptionReady = false;
       let fallbackTimerStarted = false;
 
       channel.onopen = () => {
         if (fallbackRequestedRef.current) return;
+
         void sendEncryptedFile(encryptedChunks, details, "webrtc").catch(
           (cause: unknown) => {
             if (!fallbackRequestedRef.current) {
@@ -214,11 +250,16 @@ export default function UploadPanel() {
           },
         );
       };
+
       peer.onicecandidate = (event) => {
         if (event.candidate && socket.readyState === WebSocket.OPEN) {
-          sendSignal({ type: "candidate", candidate: event.candidate });
+          sendSignal({
+            type: "candidate",
+            candidate: event.candidate,
+          });
         }
       };
+
       peer.onconnectionstatechange = () => {
         if (peer.connectionState === "failed") {
           requestFallback(encryptedChunks, details);
@@ -227,6 +268,7 @@ export default function UploadPanel() {
 
       socket.addEventListener("message", (event: MessageEvent<string>) => {
         if (typeof event.data !== "string") return;
+
         let message: {
           type?: string;
           role?: string;
@@ -234,6 +276,7 @@ export default function UploadPanel() {
           answer?: RTCSessionDescriptionInit;
           message?: string;
         };
+
         try {
           message = JSON.parse(event.data) as typeof message;
         } catch {
@@ -241,19 +284,25 @@ export default function UploadPanel() {
           setPhase("error");
           return;
         }
+
         if (message.type === "peer-joined" && message.role === "receiver") {
           if (!fallbackTimerStarted) {
             fallbackTimerStarted = true;
+
             window.setTimeout(
               () => requestFallback(encryptedChunks, details),
               12_000,
             );
           }
+
           void peer
             .createOffer()
             .then((offer) => peer.setLocalDescription(offer))
             .then(() =>
-              sendSignal({ type: "offer", offer: peer.localDescription }),
+              sendSignal({
+                type: "offer",
+                offer: peer.localDescription,
+              }),
             )
             .catch((cause: unknown) => {
               setError(
@@ -268,6 +317,7 @@ export default function UploadPanel() {
             .setRemoteDescription(message.answer)
             .then(async () => {
               remoteDescriptionReady = true;
+
               while (pendingCandidates.length > 0) {
                 await peer.addIceCandidate(pendingCandidates.shift()!);
               }
@@ -303,10 +353,12 @@ export default function UploadPanel() {
           setPhase("error");
         }
       });
+
       socket.onerror = () => {
         setError("Could not connect to the signaling server");
         setPhase("error");
       };
+
       socket.onclose = (event) => {
         if (!transferStartedRef.current && event.code !== 1000) {
           setError(event.reason || "Signaling connection closed");
@@ -316,16 +368,23 @@ export default function UploadPanel() {
 
       setLink(generatedLink);
       setLocalOnlyLink(isLocalOnlyShareUrl(shareBaseUrl));
-      setExpiresAt(new Date(Date.now() + expiresInSeconds * 1000).toLocaleTimeString());
+
+      setExpiresAt(
+        new Date(Date.now() + expiresInSeconds * 1000).toLocaleTimeString(),
+      );
+
       setPhase("waiting");
+
       try {
         await navigator.clipboard.writeText(generatedLink);
         showToast("Copied!");
       } catch {
         showToast("Link created — copy it below.");
       }
+
       await new Promise<void>((resolve, reject) => {
         socket.onopen = () => resolve();
+
         socket.addEventListener(
           "error",
           () => reject(new Error("Could not connect to the signaling server")),
@@ -346,34 +405,35 @@ export default function UploadPanel() {
     try {
       await navigator.clipboard.writeText(link);
       setCopied(true);
+      showToast("Copied!");
 
-      setTimeout(() => {
+      window.setTimeout(() => {
         setCopied(false);
       }, 2000);
-    } catch (error) {
-      console.error("Copy failed:", error);
-      setError("Could not copy link. Please copy it manually.");
-      showToast("Copied!");
     } catch {
-      setError("Clipboard access failed. Select and copy the link manually.");
+      setError("Could not copy link. Please copy it manually.");
     }
   }
 
   function reset() {
     socketRef.current?.close();
     peerRef.current?.close();
+
     socketRef.current = null;
     peerRef.current = null;
     channelRef.current = null;
     transferStartedRef.current = false;
     fallbackRequestedRef.current = false;
+
     setPhase("idle");
     setProgress(0);
     setFileName("");
     setLink("");
     setLocalOnlyLink(false);
+    setExpiresAt("");
     setError("");
     setToast("");
+    setCopied(false);
   }
 
   return (
@@ -387,6 +447,7 @@ export default function UploadPanel() {
           {toast}
         </div>
       )}
+
       {phase === "idle" || phase === "error" ? (
         <button
           type="button"
@@ -411,10 +472,13 @@ export default function UploadPanel() {
           <span className="mb-4 grid size-14 place-items-center rounded-2xl bg-violet-500/15 text-2xl text-violet-300">
             ↑
           </span>
+
           <span className="font-medium">Drop a file here or browse</span>
+
           <span className="mt-2 text-sm text-zinc-500">
             Up to 1 GB · Encrypted in your browser
           </span>
+
           <input
             ref={inputRef}
             type="file"
@@ -432,16 +496,18 @@ export default function UploadPanel() {
             <span className="grid size-12 shrink-0 place-items-center rounded-xl bg-violet-500/15 text-xl text-violet-300">
               {phase === "complete" ? "✓" : "↗"}
             </span>
+
             <div className="min-w-0 flex-1">
               <p className="truncate font-medium">{fileName}</p>
+
               <p className="mt-1 text-sm text-zinc-400">
                 {phase === "encrypting" && "Encrypting file"}
-                {phase === "waiting" &&
-                  "Link generated · Waiting for recipient"}
+                {phase === "waiting" && "Link generated · Waiting for recipient"}
                 {phase === "transferring" && "Transfer in progress"}
                 {phase === "complete" && "Transfer complete"}
               </p>
             </div>
+
             <span className="text-sm tabular-nums text-zinc-400">
               {progress}%
             </span>
@@ -465,6 +531,7 @@ export default function UploadPanel() {
               <p className="mb-2 text-xs font-medium tracking-wide text-zinc-400 uppercase">
                 Temporary link · Expires at {expiresAt}
               </p>
+
               <div className="flex gap-2">
                 <input
                   readOnly
@@ -472,6 +539,7 @@ export default function UploadPanel() {
                   aria-label="Temporary share link"
                   className="min-w-0 flex-1 rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-zinc-300 outline-none"
                 />
+
                 <div className="relative inline-flex items-center gap-2">
                   <button
                     type="button"
@@ -491,15 +559,20 @@ export default function UploadPanel() {
                   )}
                 </div>
               </div>
+
               <p className="mt-3 text-xs leading-5 text-amber-200/75">
                 The link includes the decryption key. Share it only with your
                 recipient.
               </p>
+
               {localOnlyLink && (
-                <p className="mt-2 text-xs leading-5 text-amber-200/75" role="note">
-                  Local-only link: it works on this computer, not on another device.
-                  For cross-device sharing, use a reachable frontend URL and configure
-                  the API and signaling URLs.
+                <p
+                  className="mt-2 text-xs leading-5 text-amber-200/75"
+                  role="note"
+                >
+                  Local-only link: it works on this computer, not on another
+                  device. For cross-device sharing, use a reachable frontend
+                  URL and configure the API and signaling URLs.
                 </p>
               )}
             </div>
@@ -510,6 +583,7 @@ export default function UploadPanel() {
               {error}
             </p>
           )}
+
           {phase === "complete" && (
             <button
               type="button"
@@ -521,6 +595,7 @@ export default function UploadPanel() {
           )}
         </div>
       )}
+
       {phase === "error" && error && (
         <p className="mt-4 text-sm text-red-300" role="alert">
           {error}
@@ -529,3 +604,4 @@ export default function UploadPanel() {
     </div>
   );
 }
+
