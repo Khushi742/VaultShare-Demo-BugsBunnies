@@ -26,6 +26,9 @@ export default function UploadPanel() {
   const channelRef = useRef<RTCDataChannel | null>(null);
   const transferStartedRef = useRef(false);
   const fallbackRequestedRef = useRef(false);
+  // Every upload gets a run id. Cancelling (or starting a new upload) bumps it,
+  // so any work still running for the old upload knows to stop quietly.
+  const runIdRef = useRef(0);
 
   const [phase, setPhase] = useState<Phase>("idle");
   const [progress, setProgress] = useState(0);
@@ -55,7 +58,11 @@ export default function UploadPanel() {
     chunks: ArrayBuffer[],
     details: { name: string; type: string; size: number },
     transport: "webrtc" | "websocket",
+    runId: number,
   ) {
+    const cancelled = () => runIdRef.current !== runId;
+
+    if (cancelled()) return;
     if (transferStartedRef.current) return;
     transferStartedRef.current = true;
     setPhase("transferring");
@@ -79,8 +86,11 @@ export default function UploadPanel() {
       channel.send(manifest);
 
       for (let index = 0; index < chunks.length; index += 1) {
+        if (cancelled()) return;
+
         while (channel.bufferedAmount > 256 * 1024) {
           await new Promise((resolve) => window.setTimeout(resolve, 20));
+          if (cancelled()) return;
           if (channel.readyState !== "open") {
             throw new Error("Peer-to-peer connection closed during transfer");
           }
@@ -101,8 +111,11 @@ export default function UploadPanel() {
     socket.send(manifest);
 
     for (let index = 0; index < chunks.length; index += 1) {
+      if (cancelled()) return;
+
       while (socket.bufferedAmount > 256 * 1024) {
         await new Promise((resolve) => window.setTimeout(resolve, 20));
+        if (cancelled()) return;
         if (socket.readyState !== WebSocket.OPEN) {
           throw new Error("Fallback connection closed during transfer");
         }
@@ -116,7 +129,9 @@ export default function UploadPanel() {
   function requestFallback(
     chunks: ArrayBuffer[],
     details: { name: string; type: string; size: number },
+    runId: number,
   ) {
+    if (runIdRef.current !== runId) return;
     if (fallbackRequestedRef.current || transferStartedRef.current) return;
     fallbackRequestedRef.current = true;
 
@@ -134,6 +149,10 @@ export default function UploadPanel() {
     if (!socket) return;
 
     const handleMessage = (event: MessageEvent) => {
+      if (runIdRef.current !== runId) {
+        socket.removeEventListener("message", handleMessage);
+        return;
+      }
       if (typeof event.data !== "string") return;
 
       let message: { type?: string };
@@ -149,8 +168,9 @@ export default function UploadPanel() {
       if (message.type === "fallback-ready") {
         socket.removeEventListener("message", handleMessage);
 
-        void sendEncryptedFile(chunks, details, "websocket").catch(
+        void sendEncryptedFile(chunks, details, "websocket", runId).catch(
           (cause: unknown) => {
+            if (runIdRef.current !== runId) return;
             setError(
               cause instanceof Error ? cause.message : "File transfer failed",
             );
@@ -176,6 +196,11 @@ export default function UploadPanel() {
       return;
     }
 
+    // Start a new run. Anything still running from an older upload goes stale.
+    runIdRef.current += 1;
+    const runId = runIdRef.current;
+    const isStale = () => runIdRef.current !== runId;
+
     socketRef.current?.close();
     peerRef.current?.close();
 
@@ -195,11 +220,16 @@ export default function UploadPanel() {
     try {
       const shareBaseUrl = getShareBaseUrl();
       const { key, encodedKey } = await createTransferKey();
-      const encryptedChunks = await encryptFile(file, key, setProgress);
+      const encryptedChunks = await encryptFile(file, key, (value: number) => {
+        if (!isStale()) setProgress(value);
+      });
+      if (isStale()) return;
 
       showToast("Encrypted!");
 
       const { transferId, expiresInSeconds } = await createTransfer();
+      if (isStale()) return;
+
       const generatedUrl = new URL(`/receive/${transferId}`, shareBaseUrl);
 
       generatedUrl.hash = new URLSearchParams({
@@ -234,24 +264,30 @@ export default function UploadPanel() {
       let fallbackTimerStarted = false;
 
       channel.onopen = () => {
+        if (isStale()) return;
         if (fallbackRequestedRef.current) return;
 
-        void sendEncryptedFile(encryptedChunks, details, "webrtc").catch(
-          (cause: unknown) => {
-            if (!fallbackRequestedRef.current) {
-              transferStartedRef.current = false;
-              requestFallback(encryptedChunks, details);
-            } else {
-              setError(
-                cause instanceof Error ? cause.message : "File transfer failed",
-              );
-              setPhase("error");
-            }
-          },
-        );
+        void sendEncryptedFile(
+          encryptedChunks,
+          details,
+          "webrtc",
+          runId,
+        ).catch((cause: unknown) => {
+          if (isStale()) return;
+          if (!fallbackRequestedRef.current) {
+            transferStartedRef.current = false;
+            requestFallback(encryptedChunks, details, runId);
+          } else {
+            setError(
+              cause instanceof Error ? cause.message : "File transfer failed",
+            );
+            setPhase("error");
+          }
+        });
       };
 
       peer.onicecandidate = (event) => {
+        if (isStale()) return;
         if (event.candidate && socket.readyState === WebSocket.OPEN) {
           sendSignal({
             type: "candidate",
@@ -261,12 +297,14 @@ export default function UploadPanel() {
       };
 
       peer.onconnectionstatechange = () => {
+        if (isStale()) return;
         if (peer.connectionState === "failed") {
-          requestFallback(encryptedChunks, details);
+          requestFallback(encryptedChunks, details, runId);
         }
       };
 
       socket.addEventListener("message", (event: MessageEvent<string>) => {
+        if (isStale()) return;
         if (typeof event.data !== "string") return;
 
         let message: {
@@ -290,7 +328,7 @@ export default function UploadPanel() {
             fallbackTimerStarted = true;
 
             window.setTimeout(
-              () => requestFallback(encryptedChunks, details),
+              () => requestFallback(encryptedChunks, details, runId),
               12_000,
             );
           }
@@ -305,6 +343,7 @@ export default function UploadPanel() {
               }),
             )
             .catch((cause: unknown) => {
+              if (isStale()) return;
               setError(
                 cause instanceof Error
                   ? cause.message
@@ -323,6 +362,7 @@ export default function UploadPanel() {
               }
             })
             .catch((cause: unknown) => {
+              if (isStale()) return;
               setError(
                 cause instanceof Error
                   ? cause.message
@@ -335,6 +375,7 @@ export default function UploadPanel() {
             void peer
               .addIceCandidate(message.candidate)
               .catch((cause: unknown) => {
+                if (isStale()) return;
                 setError(
                   cause instanceof Error
                     ? cause.message
@@ -355,11 +396,13 @@ export default function UploadPanel() {
       });
 
       socket.onerror = () => {
+        if (isStale()) return;
         setError("Could not connect to the signaling server");
         setPhase("error");
       };
 
       socket.onclose = (event) => {
+        if (isStale()) return;
         if (!transferStartedRef.current && event.code !== 1000) {
           setError(event.reason || "Signaling connection closed");
           setPhase("error");
@@ -392,6 +435,7 @@ export default function UploadPanel() {
         );
       });
     } catch (cause) {
+      if (isStale()) return;
       setError(
         cause instanceof Error ? cause.message : "Could not prepare this file",
       );
@@ -435,6 +479,18 @@ export default function UploadPanel() {
     setToast("");
     setCopied(false);
   }
+
+  function cancelTransfer() {
+    // Bumping the run id makes every pending step of this upload stop quietly.
+    runIdRef.current += 1;
+    socketRef.current?.close(4001, "The sender cancelled the transfer");
+    channelRef.current?.close();
+    reset();
+    showToast("Transfer cancelled");
+  }
+
+  const canCancel =
+    phase === "encrypting" || phase === "waiting" || phase === "transferring";
 
   return (
     <div className="rounded-3xl border border-white/10 bg-[#10141e]/90 p-5 shadow-2xl shadow-black/30 sm:p-8">
@@ -526,6 +582,16 @@ export default function UploadPanel() {
             />
           </div>
 
+          {canCancel && (
+            <button
+              type="button"
+              onClick={cancelTransfer}
+              className="w-full rounded-xl border border-red-400/30 py-3 text-sm text-red-300 transition hover:bg-red-500/10"
+            >
+              Cancel transfer
+            </button>
+          )}
+
           {link && (
             <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
               <p className="mb-2 text-xs font-medium tracking-wide text-zinc-400 uppercase">
@@ -604,4 +670,3 @@ export default function UploadPanel() {
     </div>
   );
 }
-
